@@ -14,9 +14,15 @@ Run:
 
 Controls:
     Mouse click / tap   move an arrow
+    Drag (left button)  pan around the board (while zoomed in)
+    Mouse wheel         zoom in / out (kept centred on the cursor)
+    + / -               zoom in / out (kept centred on the screen)
+    0                   reset the view (fit the whole board)
+    Arrow keys          pan (nudge)
     H                   hint (pulses a movable arrow)
     R                   restart the level
     M                   mute / unmute
+    F                   fullscreen
     Esc                 quit
 """
 
@@ -47,6 +53,10 @@ HUD_HEIGHT = 96
 FPS = 60
 MIN_CELL = 3  # smallest cell size (the board scales to fit the window)
 SLIDE_DUR = 0.45  # seconds an arrow takes to uncoil and slide off the board
+MIN_ZOOM = 1.0    # zoomed all the way out (whole board visible)
+MAX_ZOOM = 12.0   # maximum magnification
+ZOOM_STEP = 1.25  # zoom factor per wheel notch / +/- key press
+PAN_STEP = 40     # pixels an arrow-key pan nudge moves the view
 
 # ---------------------------------------------------------------------------
 # Palette -- plain white board with black arrows (no colours, per request).
@@ -187,10 +197,23 @@ class Game:
 
         self.hover_arrow = None
 
+        # View (camera) state for zoom / pan. ``zoom == 1`` shows the whole
+        # board; higher zoom magnifies and lets the player pan around.
+        self.zoom = 1.0
+        self._pan_x = 0
+        self._pan_y = 0
+        self.fit_cell = MIN_CELL
+        self.cell = MIN_CELL
+
         # Window state (resizable + optional fullscreen).
         self.fullscreen = False
         self.window_w, self.window_h = 900, 1200  # default; main() caps to desktop
         self._windowed_w, self._windowed_h = self.window_w, self.window_h
+
+        # pan drag state
+        self._dragging = False
+        self._drag_last = (0, 0)
+        self._drag_moved = False
 
         self._build_level()
 
@@ -204,21 +227,46 @@ class Game:
         self.hint_arrow = None
         self.hover_arrow = None
         self.state = "playing"
+        # fresh view for the new level
+        self._pan_x = 0
+        self._pan_y = 0
+        self.zoom = 1.0
+        self._dragging = False
         self._layout()
 
     def _layout(self):
-        """Scale the board to fit the current window and centre it.
-
-        The cell size is derived from the window, so the whole board is always
-        visible no matter how the window is resized or whether it's fullscreen.
-        """
+        """Recompute the on-screen cell size from the zoom and reposition the
+        board. At zoom 1 the board is centred in the play area; zoomed in, the
+        (clamped) pan offset decides where it sits."""
         avail_w = max(50, self.window_w - 48)
         avail_h = max(50, self.window_h - HUD_HEIGHT - 40)
-        self.cell = max(MIN_CELL, min(avail_w // self.cols, avail_h // self.rows))
-        board_w = self.cell * self.cols
-        board_h = self.cell * self.rows
-        self.board_x = (self.window_w - board_w) // 2
-        self.board_y = HUD_HEIGHT + (self.window_h - HUD_HEIGHT - board_h) // 2
+        self.fit_cell = max(MIN_CELL, min(avail_w // self.cols,
+                                          avail_h // self.rows))
+        self.cell = max(MIN_CELL, int(round(self.fit_cell * self.zoom)))
+        self._apply_camera()
+
+    def _apply_camera(self):
+        """Position the board from the current cell size + pan offset. When the
+        board fits the view it stays centred (pan forced to 0); when it's
+        larger than the view the pan offset is clamped so at least a strip
+        stays on screen and it can't be dragged fully away."""
+        bw, bh = self.cell * self.cols, self.cell * self.rows
+        cx = (self.window_w - bw) // 2
+        cy = HUD_HEIGHT + (self.window_h - HUD_HEIGHT - bh) // 2
+        if bw <= self.window_w:
+            self._pan_x = 0
+            self.board_x = cx
+        else:
+            lim = (bw - self.window_w) / 2 + 60
+            self._pan_x = clamp(self._pan_x, -lim, lim)
+            self.board_x = int(cx + self._pan_x)
+        if bh <= self.window_h - HUD_HEIGHT:
+            self._pan_y = 0
+            self.board_y = cy
+        else:
+            lim = (bh - (self.window_h - HUD_HEIGHT)) / 2 + 60
+            self._pan_y = clamp(self._pan_y, -lim, lim)
+            self.board_y = int(cy + self._pan_y)
 
     def cell_center(self, row, col):
         x = self.board_x + col * self.cell + self.cell // 2
@@ -233,6 +281,64 @@ class Game:
         if 0 <= row < self.rows and 0 <= col < self.cols:
             return self.board.arrow_at(row, col)
         return None
+
+    # -- zoom / pan ----------------------------------------------------------
+    def set_zoom(self, new_zoom, focus=None):
+        """Set the zoom level, keeping the board point currently under the
+        focus screen pixel (default: screen centre) fixed on screen."""
+        new_zoom = clamp(new_zoom, MIN_ZOOM, MAX_ZOOM)
+        if abs(new_zoom - self.zoom) < 1e-9:
+            return
+        fx, fy = focus if focus is not None else (
+            self.window_w / 2, (self.window_h + HUD_HEIGHT) / 2)
+        # board point (in fit-cell units) under the focus before the change
+        bcx = (fx - self.board_x) / (self.fit_cell * self.zoom)
+        bcy = (fy - self.board_y) / (self.fit_cell * self.zoom)
+        self.zoom = new_zoom
+        self.cell = max(MIN_CELL, int(round(self.fit_cell * self.zoom)))
+        # choose pan so that board point lands back under the focus pixel
+        bw, bh = self.cell * self.cols, self.cell * self.rows
+        cx = (self.window_w - bw) // 2
+        cy = HUD_HEIGHT + (self.window_h - HUD_HEIGHT - bh) // 2
+        self._pan_x = fx - bcx * self.fit_cell * new_zoom - cx
+        self._pan_y = fy - bcy * self.fit_cell * new_zoom - cy
+        self._apply_camera()
+
+    def zoom_by(self, factor, focus=None):
+        self.set_zoom(self.zoom * factor, focus)
+
+    def zoom_reset(self):
+        self.zoom = 1.0
+        self._pan_x = 0
+        self._pan_y = 0
+        self.cell = self.fit_cell
+        self._apply_camera()
+
+    def pan_by(self, dx, dy):
+        self._pan_x += dx
+        self._pan_y += dy
+        self._apply_camera()
+
+    # -- pointer handlers (drag to pan, click to tap) ----------------------
+    def on_press(self, px, py):
+        self._dragging = True
+        self._drag_last = (px, py)
+        self._drag_moved = False
+
+    def on_release(self, px, py):
+        was_click = not self._drag_moved
+        self._dragging = False
+        if was_click:
+            self.tap(px, py)
+
+    def on_motion(self, px, py):
+        if self._dragging:
+            lx, ly = self._drag_last
+            self._drag_last = (px, py)
+            if abs(px - lx) + abs(py - ly) > 0:
+                self._drag_moved = True
+                self.pan_by(px - lx, py - ly)
+        self.hover_arrow = self.arrow_at_pixel(px, py)
 
     # -- actions -----------------------------------------------------------
     def tap(self, px, py):
@@ -256,6 +362,15 @@ class Game:
         if self.full_btn.collidepoint(px, py):
             self.toggle_fullscreen()
             return
+        if self.zoom_in_btn.collidepoint(px, py):
+            self.zoom_by(ZOOM_STEP)
+            return
+        if self.zoom_out_btn.collidepoint(px, py):
+            self.zoom_by(1 / ZOOM_STEP)
+            return
+        if self.zoom_fit_btn.collidepoint(px, py):
+            self.zoom_reset()
+            return
 
         arrow = self.arrow_at_pixel(px, py)
         if arrow is None:
@@ -275,21 +390,15 @@ class Game:
         the corner at the head cell and straightening into a straight line
         that continues in the exit direction -- so the snake uncoils one
         segment at a time and leaves as a single straight line.
+
+        The slide stores the arrow's cells (not pixels) so a zoom/pan change
+        mid-animation still renders it in the right place.
         """
         self.board.remove(arrow)
-        hr, hc = arrow.head
-        cell = self.cell
-        edge = {
-            UP: (hr + 1) * cell,
-            DOWN: (self.rows - hr) * cell,
-            LEFT: (hc + 1) * cell,
-            RIGHT: (self.cols - hc) * cell,
-        }[arrow.direction]
         dr, dc = DELTA[arrow.direction]
         self.sliding.append({
-            "pts": [self.cell_center(r, c) for (r, c) in arrow.cells],
+            "cells": list(arrow.cells),
             "vx": dc, "vy": dr,
-            "edge": edge,
             "t": 0.0,
         })
         if self.board.is_solved():
@@ -436,12 +545,26 @@ class Game:
         along the pipe; past the head corner it continues in a straight line
         in the exit direction, so the snake visibly straightens out segment
         by segment as it leaves.
+
+        Points are derived from the stored cells and the *current* cell size on
+        every draw, so zoom/pan changes during the slide stay correct.
         """
-        pts = s["pts"]
+        cells = s["cells"]
         seg = self.cell
+        pts = [self.cell_center(r, c) for (r, c) in cells]
         L = seg * (len(pts) - 1)
-        pull = t * (L + s["edge"] + seg)
+        hr, hc = cells[-1]
         vx, vy = s["vx"], s["vy"]
+        # distance (in pixels) from the head to the board edge in the exit dir
+        if vx > 0:
+            edge = (self.cols - hc) * seg
+        elif vx < 0:
+            edge = (hc + 1) * seg
+        elif vy > 0:
+            edge = (self.rows - hr) * seg
+        else:
+            edge = (hr + 1) * seg
+        pull = t * (L + edge + seg)
 
         def at(a):
             """Point at arc-length ``a`` along the pipe (tail -> head),
@@ -483,20 +606,31 @@ class Game:
     # -- HUD ---------------------------------------------------------------
     def _draw_hud(self, screen):
         title = self.font_title.render("arRowMazing", True, BLACK)
-        screen.blit(title, (20, 18))
+        screen.blit(title, (20, 8))
 
         lvl = self.font_hud.render(f"Level {self.level}", True, BLACK)
-        screen.blit(lvl, (20, 52))
+        screen.blit(lvl, (20, 40))
         diff = self.font_hud_small.render(difficulty_label(self.level), True, GRAY)
-        screen.blit(diff, (20, 80))
+        screen.blit(diff, (20, 66))
+        if self.zoom > 1.01:
+            z = self.font_hud_small.render(f"zoom x{self.zoom:.1f}", True, GRAY)
+            screen.blit(z, (20, 86))
+        elif self.cols > 40:
+            # hint that the board is pannable on dense levels
+            tip = self.font_hud_small.render("scroll to zoom, drag to pan",
+                                             True, GRAY_LIGHT)
+            screen.blit(tip, (20, 86))
 
-        self._draw_button(screen, self.hint_btn, "Hint", self.font_btn)
-        self._draw_button(screen, self.restart_btn, "Restart", self.font_btn)
+        self._draw_button(screen, self.hint_btn, "Hint", self.font_hud_small)
+        self._draw_button(screen, self.restart_btn, "Restart", self.font_hud_small)
         self._draw_button(screen, self.mute_btn,
                           "Mute" if not self.sound.enabled else "Sound",
-                          self.font_btn)
+                          self.font_hud_small)
         self._draw_button(screen, self.full_btn,
-                          "Window" if self.fullscreen else "Full", self.font_btn)
+                          "Window" if self.fullscreen else "Full", self.font_hud_small)
+        self._draw_button(screen, self.zoom_out_btn, "-", self.font_hud_small)
+        self._draw_button(screen, self.zoom_in_btn, "+", self.font_hud_small)
+        self._draw_button(screen, self.zoom_fit_btn, "Fit", self.font_hud_small)
 
     def _draw_button(self, screen, rect, label, font):
         hover = rect.collidepoint(pygame.mouse.get_pos())
@@ -542,10 +676,16 @@ class Game:
 
     # -- button rects (built once) ----------------------------------------
     def _init_buttons(self):
-        self.hint_btn = pygame.Rect(self.window_w - 392, 60, 84, 42)
-        self.restart_btn = pygame.Rect(self.window_w - 300, 60, 96, 42)
-        self.mute_btn = pygame.Rect(self.window_w - 196, 60, 84, 42)
-        self.full_btn = pygame.Rect(self.window_w - 104, 60, 84, 42)
+        y, h, gap = 6, 42, 6
+        # place buttons right-to-left along the top bar
+        x = self.window_w - 10
+        self.full_btn = pygame.Rect(x - 74, y, 74, h); x -= 74 + gap
+        self.mute_btn = pygame.Rect(x - 76, y, 76, h); x -= 76 + gap
+        self.zoom_in_btn = pygame.Rect(x - 46, y, 46, h); x -= 46 + gap
+        self.zoom_out_btn = pygame.Rect(x - 46, y, 46, h); x -= 46 + gap
+        self.zoom_fit_btn = pygame.Rect(x - 50, y, 50, h); x -= 50 + gap
+        self.restart_btn = pygame.Rect(x - 90, y, 90, h); x -= 90 + gap
+        self.hint_btn = pygame.Rect(max(180, x - 66), y, 66, h)
         self.next_btn = pygame.Rect(0, 0, 1, 1)
 
 
@@ -588,9 +728,13 @@ def main():
                 game._layout()
                 game._init_buttons()
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                game.tap(*event.pos)
+                game.on_press(*event.pos)
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                game.on_release(*event.pos)
             elif event.type == pygame.MOUSEMOTION:
-                game.hover_arrow = game.arrow_at_pixel(*event.pos)
+                game.on_motion(*event.pos)
+            elif event.type == pygame.MOUSEWHEEL:
+                game.zoom_by(ZOOM_STEP ** event.y, pygame.mouse.get_pos())
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     running = False
@@ -602,6 +746,20 @@ def main():
                     game.sound.enabled = not game.sound.enabled
                 elif event.key == pygame.K_f:
                     game.toggle_fullscreen()
+                elif event.key in (pygame.K_PLUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
+                    game.zoom_by(ZOOM_STEP)
+                elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+                    game.zoom_by(1 / ZOOM_STEP)
+                elif event.key == pygame.K_0:
+                    game.zoom_reset()
+                elif event.key == pygame.K_LEFT:
+                    game.pan_by(PAN_STEP, 0)
+                elif event.key == pygame.K_RIGHT:
+                    game.pan_by(-PAN_STEP, 0)
+                elif event.key == pygame.K_UP:
+                    game.pan_by(0, PAN_STEP)
+                elif event.key == pygame.K_DOWN:
+                    game.pan_by(0, -PAN_STEP)
 
         game.update(dt)
         # Re-fetch the surface each frame so resizes / fullscreen are honoured.
