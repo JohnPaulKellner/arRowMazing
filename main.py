@@ -46,6 +46,7 @@ from board import (
 HUD_HEIGHT = 96
 FPS = 60
 MIN_CELL = 3  # smallest cell size (the board scales to fit the window)
+SLIDE_DUR = 0.45  # seconds an arrow takes to uncoil and slide off the board
 
 # ---------------------------------------------------------------------------
 # Palette -- plain white board with black arrows (no colours, per request).
@@ -268,22 +269,29 @@ class Game:
             self.sound.play("bad")
 
     def _start_slide(self, arrow):
+        """Uncoil-slide: the arrow is treated as a flexible rope lying along
+        its own cell path (the 'pipe'). Tapping pulls the tip in the exit
+        direction; every body segment slides forward along the path, turning
+        the corner at the head cell and straightening into a straight line
+        that continues in the exit direction -- so the snake uncoils one
+        segment at a time and leaves as a single straight line.
+        """
         self.board.remove(arrow)
         hr, hc = arrow.head
         cell = self.cell
-        if arrow.direction == UP:
-            dist = (hr + 1) * cell
-            dx, dy = 0, -dist
-        elif arrow.direction == DOWN:
-            dist = (self.rows - hr) * cell
-            dx, dy = 0, dist
-        elif arrow.direction == LEFT:
-            dist = (hc + 1) * cell
-            dx, dy = -dist, 0
-        else:
-            dist = (self.cols - hc) * cell
-            dx, dy = dist, 0
-        self.sliding.append({"arrow": arrow, "dx": dx, "dy": dy, "t": 0.0})
+        edge = {
+            UP: (hr + 1) * cell,
+            DOWN: (self.rows - hr) * cell,
+            LEFT: (hc + 1) * cell,
+            RIGHT: (self.cols - hc) * cell,
+        }[arrow.direction]
+        dr, dc = DELTA[arrow.direction]
+        self.sliding.append({
+            "pts": [self.cell_center(r, c) for (r, c) in arrow.cells],
+            "vx": dc, "vy": dr,
+            "edge": edge,
+            "t": 0.0,
+        })
         if self.board.is_solved():
             self._on_win()
 
@@ -333,7 +341,7 @@ class Game:
     # -- update ------------------------------------------------------------
     def update(self, dt):
         for s in self.sliding:
-            s["t"] += dt / 0.30
+            s["t"] += dt / SLIDE_DUR
         self.sliding = [s for s in self.sliding if s["t"] < 1.0]
 
         for k in list(self.shaking):
@@ -415,11 +423,55 @@ class Game:
     def _draw_sliding(self, screen):
         for s in self.sliding:
             t = ease_out(s["t"])
-            dx = s["dx"] * t
-            dy = s["dy"] * t
             color = fade_color(t)
             width = max(2, self.cell // 4)
-            self._draw_arrow(screen, s["arrow"], dx, dy, width, color)
+            self._draw_uncoiling(screen, s, t, width, color)
+
+    def _draw_uncoiling(self, screen, s, t, width, color):
+        """Draw the sliding arrow as a flexible rope being pulled out of the
+        board along its own cell path (the pipe) and into a straight line.
+
+        The rope's material runs from tail (arc position 0) to head (arc
+        position L). Pulling by ``pull`` shifts each material point forward
+        along the pipe; past the head corner it continues in a straight line
+        in the exit direction, so the snake visibly straightens out segment
+        by segment as it leaves.
+        """
+        pts = s["pts"]
+        seg = self.cell
+        L = seg * (len(pts) - 1)
+        pull = t * (L + s["edge"] + seg)
+        vx, vy = s["vx"], s["vy"]
+
+        def at(a):
+            """Point at arc-length ``a`` along the pipe (tail -> head),
+            continuing straight past the head in the exit direction."""
+            if a >= L:
+                hx, hy = pts[-1]
+                return (hx + vx * (a - L), hy + vy * (a - L))
+            i = min(int(a // seg), len(pts) - 2)
+            rem = a - i * seg
+            x0, y0 = pts[i]
+            x1, y1 = pts[i + 1]
+            return (x0 + (x1 - x0) * (rem / seg), y0 + (y1 - y0) * (rem / seg))
+
+        # material points at original arc positions 0, seg, ..., L
+        drawn = [at(p + pull) for p in range(0, len(pts) * seg, seg)]
+        for i in range(1, len(drawn)):
+            pygame.draw.line(screen, color, drawn[i - 1], drawn[i], width)
+        for (x, y) in drawn:
+            pygame.draw.circle(screen, color, (int(x), int(y)), max(1, width // 2))
+        # arrowhead rides along at the tip, always pointing in the exit dir
+        hx, hy = pts[-1]
+        hx += vx * pull
+        hy += vy * pull
+        ah_len = self.cell * 0.55
+        ah_w = self.cell * 0.34
+        px, py = -vy, vx
+        tip = (hx + vx * ah_len, hy + vy * ah_len)
+        b1 = (hx - vx * ah_len * 0.15 + px * ah_w, hy - vy * ah_len * 0.15 + py * ah_w)
+        b2 = (hx - vx * ah_len * 0.15 - px * ah_w, hy - vy * ah_len * 0.15 - py * ah_w)
+        pygame.draw.polygon(screen, color, [tip, b1, b2])
 
     def _draw_confetti(self, screen):
         for p in self.particles:
