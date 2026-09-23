@@ -57,6 +57,7 @@ MIN_ZOOM = 1.0    # zoomed all the way out (whole board visible)
 MAX_ZOOM = 12.0   # maximum magnification
 ZOOM_STEP = 1.25  # zoom factor per wheel notch / +/- key press
 PAN_STEP = 40     # pixels an arrow-key pan nudge moves the view
+DRAG_THRESHOLD = 6  # px of movement before a press becomes a pan (vs. a tap)
 
 # ---------------------------------------------------------------------------
 # Palette -- plain white board with black arrows (no colours, per request).
@@ -124,6 +125,9 @@ class Sound:
             self._ready = False
 
     def _build(self, np, sndarray):
+        init = pygame.mixer.get_init()
+        channels = init[2] if init else 1
+
         def tone(freq, ms, vol=0.35):
             sr = 44100
             n = int(sr * ms / 1000)
@@ -131,6 +135,9 @@ class Sound:
             wave = np.sin(2 * np.pi * freq * t)
             fade = np.linspace(1.0, 0.0, n)
             wave = (wave * fade * vol * 32767).astype(np.int16)
+            if channels > 1:
+                # make_sound needs an (n, channels) array for a stereo mixer.
+                wave = np.repeat(wave.reshape(-1, 1), channels, axis=1)
             return sndarray.make_sound(wave)
 
         self._sounds["good"] = tone(660, 120)
@@ -212,6 +219,7 @@ class Game:
 
         # pan drag state
         self._dragging = False
+        self._drag_start = (0, 0)
         self._drag_last = (0, 0)
         self._drag_moved = False
 
@@ -322,6 +330,7 @@ class Game:
     # -- pointer handlers (drag to pan, click to tap) ----------------------
     def on_press(self, px, py):
         self._dragging = True
+        self._drag_start = (px, py)
         self._drag_last = (px, py)
         self._drag_moved = False
 
@@ -333,11 +342,16 @@ class Game:
 
     def on_motion(self, px, py):
         if self._dragging:
-            lx, ly = self._drag_last
-            self._drag_last = (px, py)
-            if abs(px - lx) + abs(py - ly) > 0:
-                self._drag_moved = True
+            if not self._drag_moved:
+                sx, sy = self._drag_start
+                # Ignore small jitter so a slightly shaky click still
+                # registers as a tap instead of being eaten as a pan.
+                if abs(px - sx) + abs(py - sy) > DRAG_THRESHOLD:
+                    self._drag_moved = True
+            if self._drag_moved:
+                lx, ly = self._drag_last
                 self.pan_by(px - lx, py - ly)
+            self._drag_last = (px, py)
         self.hover_arrow = self.arrow_at_pixel(px, py)
 
     # -- actions -----------------------------------------------------------
