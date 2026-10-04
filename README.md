@@ -27,6 +27,8 @@ looping border arrows.
 | `H`               | Hint (pulses a movable arrow)   |
 | `R`               | Restart the current level       |
 | `M`               | Mute / unmute sound             |
+| `,` / `.`         | Volume down / up (default 25%)  |
+| `Vol+` / `Vol-`   | Volume up / down buttons        |
 | `F`               | Toggle fullscreen               |
 | `Esc`             | Quit                            |
 
@@ -126,4 +128,5 @@ colours.
 - Uses **pygame-ce** (community edition), a drop-in replacement for pygame that
   ships prebuilt wheels.
 - Sound effects are generated at runtime (no asset files needed) and can be
-  muted with `M`.
+  muted with `M` or adjusted with `,` / `.` (and the
+  **Vol+** / **Vol-** buttons). The volume defaults to **25%**.
