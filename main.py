@@ -15,6 +15,7 @@ Run:
 Controls:
     Mouse click / tap   move an arrow
     Drag (left button)  pan around the board (while zoomed in)
+    (3 mistakes on a board end the level: replay it or exit the game)
     Mouse wheel         zoom in / out (kept centred on the cursor)
     + / -               zoom in / out (kept centred on the screen)
     0                   reset the view (fit the whole board)
@@ -59,6 +60,7 @@ MAX_ZOOM = 12.0   # maximum magnification
 ZOOM_STEP = 1.25  # zoom factor per wheel notch / +/- key press
 PAN_STEP = 40     # pixels an arrow-key pan nudge moves the view
 DRAG_THRESHOLD = 6  # px of movement before a press becomes a pan (vs. a tap)
+MAX_MISTAKES = 3    # blocked taps allowed on a board before the game is over
 
 # ---------------------------------------------------------------------------
 # Palette -- plain white board with black arrows (no colours, per request).
@@ -212,7 +214,7 @@ class Particle:
 # ---------------------------------------------------------------------------
 class Game:
     def __init__(self, seed=None, start_level=1):
-        self.rng = random.Random(seed)
+        self.seed = seed if seed is not None else random.randrange(10**12)
         self.level = max(1, start_level)
         self.mistakes = 0
         self.sound = Sound()
@@ -224,9 +226,10 @@ class Game:
         self.font_btn = make_font(20, bold=True)
         self.font_star = make_font(38, bold=True)
 
-        self.state = "playing"  # playing | win
+        self.state = "playing"  # playing | win | game_over
         self.win_time = 0.0
         self.particles: list[Particle] = []
+        self.running = True
 
         self.hint_arrow = None
         self.hint_time = 0.0
@@ -258,7 +261,8 @@ class Game:
     # -- level setup -------------------------------------------------------
     def _build_level(self):
         rows, cols, min_len, max_len = level_config(self.level)
-        self.board = generate_board(rows, cols, self.rng, min_len, max_len)
+        level_rng = random.Random(f"{self.seed}:{self.level}")
+        self.board = generate_board(rows, cols, level_rng, min_len, max_len)
         self.rows, self.cols = rows, cols
         self.sliding: list[dict] = []
         self.shaking: dict[int, float] = {}
@@ -386,6 +390,12 @@ class Game:
 
     # -- actions -----------------------------------------------------------
     def tap(self, px, py):
+        if self.state == "game_over":
+            if self.replay_btn.collidepoint(px, py):
+                self.restart()
+            elif self.exit_btn.collidepoint(px, py):
+                self.running = False
+            return
         if self.state == "win":
             if self.next_btn.collidepoint(px, py):
                 self.level += 1
@@ -432,6 +442,8 @@ class Game:
             self.mistakes += 1
             self.shaking[id(arrow)] = 0.35
             self.sound.play("bad")
+            if self.mistakes >= MAX_MISTAKES:
+                self._on_game_over()
 
     def _start_slide(self, arrow):
         """Uncoil-slide: the arrow is treated as a flexible rope lying along
@@ -459,6 +471,12 @@ class Game:
         self.win_time = 0.0
         self.sound.play("win")
         self._spawn_confetti()
+
+    def _on_game_over(self):
+        self.state = "game_over"
+        self.hint_arrow = None
+        self.hover_arrow = None
+        self.sound.play("bad")
 
     def _spawn_confetti(self):
         colors = [BLACK, GRAY, GRAY_LIGHT]
@@ -530,6 +548,8 @@ class Game:
         self._draw_confetti(screen)
         if self.state == "win":
             self._draw_win_overlay(screen)
+        elif self.state == "game_over":
+            self._draw_game_over_overlay(screen)
 
     def _draw_board(self, screen):
         # A thin frame around the board region for a little definition.
@@ -729,6 +749,33 @@ class Game:
             btn_txt = self.font_btn.render("Next Level  >", True, BLACK)
         screen.blit(btn_txt, btn_txt.get_rect(center=self.next_btn.center))
 
+    def _draw_game_over_overlay(self, screen):
+        overlay = pygame.Surface((self.window_w, self.window_h), pygame.SRCALPHA)
+        overlay.fill((255, 255, 255, 170))
+        screen.blit(overlay, (0, 0))
+
+        panel_w, panel_h = min(460, self.window_w - 40), 300
+        px = (self.window_w - panel_w) // 2
+        py = (self.window_h - panel_h) // 2
+        panel = pygame.Rect(px, py, panel_w, panel_h)
+        pygame.draw.rect(screen, WHITE, panel, border_radius=18)
+        pygame.draw.rect(screen, BLACK, panel, width=2, border_radius=18)
+
+        head = self.font_big.render("Game Over", True, BLACK)
+        screen.blit(head, head.get_rect(center=(self.window_w // 2, py + 62)))
+
+        sub = self.font_hud_small.render(
+            f"{MAX_MISTAKES} mistakes reached on level {self.level}.", True, GRAY)
+        screen.blit(sub, sub.get_rect(center=(self.window_w // 2, py + 120)))
+        sub2 = self.font_hud_small.render(
+            "Replay this board or exit the game.", True, GRAY)
+        screen.blit(sub2, sub2.get_rect(center=(self.window_w // 2, py + 150)))
+
+        self.replay_btn = pygame.Rect(self.window_w // 2 - 110, py + 178, 220, 44)
+        self.exit_btn = pygame.Rect(self.window_w // 2 - 110, py + 232, 220, 44)
+        self._draw_button(screen, self.replay_btn, "Replay Level", self.font_btn)
+        self._draw_button(screen, self.exit_btn, "Exit Game", self.font_btn)
+
     # -- button rects (built once) ----------------------------------------
     def _init_buttons(self):
         y, h, gap = 6, 42, 6
@@ -744,6 +791,8 @@ class Game:
         self.restart_btn = pygame.Rect(x - 90, y, 90, h); x -= 90 + gap
         self.hint_btn = pygame.Rect(max(180, x - 66), y, 66, h)
         self.next_btn = pygame.Rect(0, 0, 1, 1)
+        self.replay_btn = pygame.Rect(0, 0, 1, 1)
+        self.exit_btn = pygame.Rect(0, 0, 1, 1)
 
 
 def main():
@@ -773,12 +822,11 @@ def main():
     pygame.display.set_caption("arRowMazing")
     clock = pygame.time.Clock()
 
-    running = True
-    while running:
+    while game.running:
         dt = clock.tick(FPS) / 1000.0
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                running = False
+                game.running = False
             elif event.type == pygame.VIDEORESIZE:
                 game.window_w = event.w
                 game.window_h = event.h
@@ -794,7 +842,7 @@ def main():
                 game.zoom_by(ZOOM_STEP ** event.y, pygame.mouse.get_pos())
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
-                    running = False
+                    game.running = False
                 elif event.key == pygame.K_h:
                     game.show_hint()
                 elif event.key == pygame.K_r:
