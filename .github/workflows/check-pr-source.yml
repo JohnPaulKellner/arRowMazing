@@ -1,0 +1,19 @@
+name: Check PR Source Branch
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches:
+      - main
+
+jobs:
+  validate-source:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert source branch is develop
+        if: github.head_ref != 'develop'
+        run: |
+          echo "ERROR: Pull requests targeting 'main' are only allowed from 'develop'."
+          echo "Your current source branch is: ${{ github.head_ref }}"
+          exit 1
+
