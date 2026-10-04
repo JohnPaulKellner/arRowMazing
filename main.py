@@ -22,6 +22,7 @@ Controls:
     H                   hint (pulses a movable arrow)
     R                   restart the level
     M                   mute / unmute
+    , / .               volume down / up (defaults to 25%)
     F                   fullscreen
     Esc                 quit
 """
@@ -109,9 +110,14 @@ def make_font(size, bold=False):
 # ---------------------------------------------------------------------------
 # Sound (optional -- generated beeps, no asset files needed)
 # ---------------------------------------------------------------------------
+DEFAULT_VOLUME = 0.25
+VOLUME_STEPS = (0.25, 0.5, 0.75, 1.0)
+
+
 class Sound:
     def __init__(self):
         self.enabled = True
+        self.volume = DEFAULT_VOLUME
         self._ready = False
         self._sounds = {}
         try:
@@ -143,10 +149,34 @@ class Sound:
         self._sounds["good"] = tone(660, 120)
         self._sounds["bad"] = tone(160, 160, 0.3)
         self._sounds["win"] = tone(880, 220, 0.4)
+        self._apply_volume()
+
+    def _apply_volume(self):
+        if not self._ready:
+            return
+        for snd in self._sounds.values():
+            try:
+                snd.set_volume(self.volume)
+            except Exception:
+                pass
+
+    def set_volume(self, volume):
+        self.volume = max(0.0, min(1.0, volume))
+        self._apply_volume()
+
+    def volume_step(self, delta):
+        """Move one step along VOLUME_STEPS (delta = +1 louder, -1 quieter)."""
+        import bisect
+        idx = bisect.bisect_left(list(VOLUME_STEPS), round(self.volume, 4))
+        if idx >= len(VOLUME_STEPS):
+            idx = len(VOLUME_STEPS) - 1
+        idx = max(0, min(len(VOLUME_STEPS) - 1, idx + delta))
+        self.set_volume(VOLUME_STEPS[idx])
 
     def play(self, name):
         if self.enabled and self._ready and name in self._sounds:
             try:
+                self._sounds[name].set_volume(self.volume)
                 self._sounds[name].play()
             except Exception:
                 pass
@@ -372,6 +402,12 @@ class Game:
             return
         if self.mute_btn.collidepoint(px, py):
             self.sound.enabled = not self.sound.enabled
+            return
+        if self.vol_down_btn.collidepoint(px, py):
+            self.sound.volume_step(-1)
+            return
+        if self.vol_up_btn.collidepoint(px, py):
+            self.sound.volume_step(+1)
             return
         if self.full_btn.collidepoint(px, py):
             self.toggle_fullscreen()
@@ -640,6 +676,11 @@ class Game:
         self._draw_button(screen, self.mute_btn,
                           "Mute" if not self.sound.enabled else "Sound",
                           self.font_hud_small)
+        self._draw_button(screen, self.vol_down_btn, "Vol-", self.font_hud_small)
+        self._draw_button(screen, self.vol_up_btn, "Vol+", self.font_hud_small)
+        pct = self.font_hud_small.render(
+            f"Vol {int(round(self.sound.volume * 100))}%", True, GRAY)
+        screen.blit(pct, (self.vol_down_btn.x, self.vol_up_btn.bottom + 4))
         self._draw_button(screen, self.full_btn,
                           "Window" if self.fullscreen else "Full", self.font_hud_small)
         self._draw_button(screen, self.zoom_out_btn, "-", self.font_hud_small)
@@ -695,6 +736,8 @@ class Game:
         x = self.window_w - 10
         self.full_btn = pygame.Rect(x - 74, y, 74, h); x -= 74 + gap
         self.mute_btn = pygame.Rect(x - 76, y, 76, h); x -= 76 + gap
+        self.vol_up_btn = pygame.Rect(x - 56, y, 56, h); x -= 56 + gap
+        self.vol_down_btn = pygame.Rect(x - 56, y, 56, h); x -= 56 + gap
         self.zoom_in_btn = pygame.Rect(x - 46, y, 46, h); x -= 46 + gap
         self.zoom_out_btn = pygame.Rect(x - 46, y, 46, h); x -= 46 + gap
         self.zoom_fit_btn = pygame.Rect(x - 50, y, 50, h); x -= 50 + gap
@@ -758,6 +801,10 @@ def main():
                     game.restart()
                 elif event.key == pygame.K_m:
                     game.sound.enabled = not game.sound.enabled
+                elif event.key in (pygame.K_COMMA, pygame.K_KP_MINUS):
+                    game.sound.volume_step(-1)
+                elif event.key in (pygame.K_PERIOD, pygame.K_KP_PLUS):
+                    game.sound.volume_step(+1)
                 elif event.key == pygame.K_f:
                     game.toggle_fullscreen()
                 elif event.key in (pygame.K_PLUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
