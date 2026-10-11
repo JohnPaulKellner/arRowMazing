@@ -3,3 +3,10 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# Build tooling / Android build artifacts
+.venv-build/
+.buildozer/
+build/
+bin/
+*.keystore
